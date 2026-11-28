@@ -135,6 +135,12 @@ func isUnitExists(err error) bool {
 	return isDbusError(err, "org.freedesktop.systemd1.UnitExists")
 }
 
+// dbusTimeout is the maximum time to wait for a systemd D-Bus operation
+// to complete. If systemd is hung, a D-Bus call without a deadline never
+// returns, and some of go-systemd's methods hold internal locks while
+// waiting for the reply, blocking all other users of the connection.
+const dbusTimeout = 30 * time.Second
+
 func startUnit(cm *dbusConnManager, unitName string, properties []systemdDbus.Property, ignoreExist bool) error {
 	statusChan := make(chan string, 1)
 	retry := true
@@ -224,29 +230,37 @@ func addPid(cm *dbusConnManager, unitName, subcgroup string, pid int) error {
 		return fmt.Errorf("bad sub cgroup path: %s", subcgroup)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), dbusTimeout)
+	defer cancel()
 	return cm.retryOnDisconnect(func(c *systemdDbus.Conn) error {
-		return c.AttachProcessesToUnit(context.TODO(), unitName, absSubcgroup, []uint32{uint32(pid)})
+		return c.AttachProcessesToUnit(ctx, unitName, absSubcgroup, []uint32{uint32(pid)})
 	})
 }
 
 func resetFailedUnit(cm *dbusConnManager, name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), dbusTimeout)
+	defer cancel()
 	return cm.retryOnDisconnect(func(c *systemdDbus.Conn) error {
-		return c.ResetFailedUnitContext(context.TODO(), name)
+		return c.ResetFailedUnitContext(ctx, name)
 	})
 }
 
 func getUnitTypeProperty(cm *dbusConnManager, unitName string, unitType string, propertyName string) (*systemdDbus.Property, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dbusTimeout)
+	defer cancel()
 	var prop *systemdDbus.Property
 	err := cm.retryOnDisconnect(func(c *systemdDbus.Conn) (Err error) {
-		prop, Err = c.GetUnitTypePropertyContext(context.TODO(), unitName, unitType, propertyName)
+		prop, Err = c.GetUnitTypePropertyContext(ctx, unitName, unitType, propertyName)
 		return Err
 	})
 	return prop, err
 }
 
 func setUnitProperties(cm *dbusConnManager, name string, properties ...systemdDbus.Property) error {
+	ctx, cancel := context.WithTimeout(context.Background(), dbusTimeout)
+	defer cancel()
 	return cm.retryOnDisconnect(func(c *systemdDbus.Conn) error {
-		return c.SetUnitPropertiesContext(context.TODO(), name, true, properties...)
+		return c.SetUnitPropertiesContext(ctx, name, true, properties...)
 	})
 }
 
