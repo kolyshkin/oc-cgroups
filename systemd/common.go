@@ -145,12 +145,21 @@ func startUnit(cm *dbusConnManager, unitName string, properties []systemdDbus.Pr
 	statusChan := make(chan string, 1)
 	retry := true
 
+	// A single deadline for the whole operation, including D-Bus
+	// reconnects, a retry, and waiting for the job to complete.
+	ctx, cancel := context.WithTimeout(context.Background(), dbusTimeout)
+	defer cancel()
+
 retry:
 	err := cm.retryOnDisconnect(func(c *systemdDbus.Conn) error {
-		_, err := c.StartTransientUnitContext(context.TODO(), unitName, "replace", properties, statusChan)
+		_, err := c.StartTransientUnitContext(ctx, unitName, "replace", properties, statusChan)
 		return err
 	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// No reply from systemd; resetFailedUnit would also hang.
+			return errors.New("Timeout waiting for systemd to create " + unitName)
+		}
 		if !isUnitExists(err) {
 			return err
 		}
@@ -174,9 +183,6 @@ retry:
 		return err
 	}
 
-	timeout := time.NewTimer(30 * time.Second)
-	defer timeout.Stop()
-
 	select {
 	case s := <-statusChan:
 		close(statusChan)
@@ -185,7 +191,7 @@ retry:
 			_ = resetFailedUnit(cm, unitName)
 			return fmt.Errorf("error creating systemd unit `%s`: got `%s`", unitName, s)
 		}
-	case <-timeout.C:
+	case <-ctx.Done():
 		_ = resetFailedUnit(cm, unitName)
 		return errors.New("Timeout waiting for systemd to create " + unitName)
 	}
@@ -195,14 +201,17 @@ retry:
 
 func stopUnit(cm *dbusConnManager, unitName string) error {
 	statusChan := make(chan string, 1)
+
+	// A single deadline for the whole operation, including D-Bus
+	// reconnects and waiting for the job to complete.
+	ctx, cancel := context.WithTimeout(context.Background(), dbusTimeout)
+	defer cancel()
+
 	err := cm.retryOnDisconnect(func(c *systemdDbus.Conn) error {
-		_, err := c.StopUnitContext(context.TODO(), unitName, "replace", statusChan)
+		_, err := c.StopUnitContext(ctx, unitName, "replace", statusChan)
 		return err
 	})
 	if err == nil {
-		timeout := time.NewTimer(30 * time.Second)
-		defer timeout.Stop()
-
 		select {
 		case s := <-statusChan:
 			close(statusChan)
@@ -210,9 +219,13 @@ func stopUnit(cm *dbusConnManager, unitName string) error {
 			if s != "done" {
 				logrus.Warnf("error removing unit `%s`: got `%s`. Continuing...", unitName, s)
 			}
-		case <-timeout.C:
-			return errors.New("Timed out while waiting for systemd to remove " + unitName)
+		case <-ctx.Done():
+			err = ctx.Err()
 		}
+	}
+	// Other errors (e.g. the unit does not exist) are ignored.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.New("Timed out while waiting for systemd to remove " + unitName)
 	}
 
 	// In case of a failed unit, let systemd remove it.
