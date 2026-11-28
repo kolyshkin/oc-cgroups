@@ -278,11 +278,30 @@ func setUnitProperties(cm *dbusConnManager, name string, properties ...systemdDb
 }
 
 func getManagerProperty(cm *dbusConnManager, name string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), dbusTimeout)
+	defer cancel()
+
 	str := ""
 	err := cm.retryOnDisconnect(func(c *systemdDbus.Conn) error {
-		var err error
-		str, err = c.GetManagerProperty(name)
-		return err
+		// GetManagerProperty has no context-aware variant, so run it in
+		// a goroutine, abandoning it on timeout. Unlike startJob, it
+		// holds no locks, so other users of c are not affected.
+		type result struct {
+			str string
+			err error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			str, err := c.GetManagerProperty(name)
+			ch <- result{str, err}
+		}()
+		select {
+		case r := <-ch:
+			str = r.str
+			return r.err
+		case <-ctx.Done():
+			return fmt.Errorf("unable to get systemd manager property %s: %w", name, ctx.Err())
+		}
 	})
 	if err != nil {
 		return "", err
